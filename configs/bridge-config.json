@@ -1,0 +1,17 @@
+{
+  "event_url": "ipc:///tmp/concentratord_event",
+  "command_url": "ipc:///tmp/concentratord_command",
+  "channel_preset": "LongFast",
+  "region": "US",
+  "channel_name": "LongFast",
+  "channel_psk": null,
+  "node_id": 0,
+  "long_name": "Concentrator Node",
+  "short_name": "CONC",
+  "hop_limit": 3,
+  "rebroadcast": true,
+  "api_socket": "/tmp/meshtastic-bridge.sock",
+  "api_port": 0,
+  "nodedb_path": "/var/lib/meshtastic-bridge/nodedb.json",
+  "state_dir": "/var/lib/meshtastic-bridge"
+}

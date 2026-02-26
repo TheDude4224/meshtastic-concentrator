@@ -1,0 +1,91 @@
+# ChirpStack Concentratord — RAK5146 USB (SX1303) on US915
+# Ref: https://www.chirpstack.io/docs/chirpstack-concentratord/
+
+[concentratord]
+log_level = "INFO"
+log_to_syslog = false
+
+# Event and command ZMQ sockets
+stats_interval = "30s"
+
+  [concentratord.api]
+  event_bind = "ipc:///tmp/concentratord_event"
+  command_bind = "ipc:///tmp/concentratord_command"
+
+[gateway]
+# Antenna gain in dBi
+antenna_gain = 0
+# Set to your gateway's actual location
+lorawan_public = true
+
+  [gateway.location]
+  latitude = 0.0
+  longitude = 0.0
+  altitude = 0
+
+# US915 channel plan — 8-channel sub-band 2 (channels 8-15, 903.9–905.3 MHz)
+# This is the most common sub-band for Helium/TTN in the US
+[[gateway.channels.multi_sf]]
+frequency = 903900000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 904100000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 904300000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 904500000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 904700000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 904900000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 905100000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.multi_sf]]
+frequency = 905300000
+bandwidth = 125000
+spreading_factors = [7, 8, 9, 10, 11, 12]
+rssi_offset = -215.4
+
+[[gateway.channels.lora_std]]
+frequency = 904600000
+bandwidth = 500000
+spreading_factor = 8
+rssi_offset = -215.4
+
+[[gateway.channels.fsk]]
+frequency = 904800000
+bandwidth = 125000
+datarate = 50000
+rssi_offset = -215.4
+
+[gateway.model]
+# RAK5146 USB with SX1303
+com_type = "USB"
+com_path = "/dev/ttyUSB0"

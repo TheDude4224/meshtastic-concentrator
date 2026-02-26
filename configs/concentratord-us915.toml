@@ -1,0 +1,91 @@
+# ChirpStack Concentratord configuration for RAK5146 USB
+# Region: US915
+# Configured for Meshtastic LongFast channel reception
+#
+# Install: https://www.chirpstack.io/docs/chirpstack-concentratord/
+# Hardware: RAK5146 USB (SX1303)
+
+[concentratord]
+# Log level (TRACE, DEBUG, INFO, WARN, ERROR)
+log_level = "INFO"
+
+# Statistics interval
+stats_interval = "30s"
+
+# API interfaces
+[concentratord.api]
+event_bind = "ipc:///tmp/concentratord_event"
+command_bind = "ipc:///tmp/concentratord_command"
+
+
+[gateway]
+# Gateway ID (EUI-64) — auto-generated from hardware if 0
+# Override for fleet management
+gateway_id = "0000000000000000"
+
+
+# SX1303 USB configuration (RAK5146)
+[gateway.model]
+# For RAK5146 USB on ChirpStack Concentratord
+lorawan_public = false  # Meshtastic uses private sync word (0x12 vs 0x34)
+model = "rak_5146"
+reset_pin = "/dev/gpiochip0/17"
+
+[gateway.model.usb]
+# USB device path — RAK5146 USB typically shows up as /dev/ttyACM0
+device = "/dev/ttyACM0"
+
+
+# US915 channel plan
+# Meshtastic US915 uses 906.875 - 914.875 MHz
+# We configure the 8 IF channels to cover the Meshtastic frequency slots
+[gateway.concentrator]
+
+# Multi-SF channels (8 channels, each can decode SF7-SF12)
+# Centered on Meshtastic US915 frequencies
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 906875000  # Meshtastic slot 0 / LongFast primary
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 907375000  # Slot 1
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 907875000  # Slot 2
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 908375000  # Slot 3
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 908875000  # Slot 4
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 909375000  # Slot 5
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 909875000  # Slot 6
+  bandwidth = 250000
+
+  [[gateway.concentrator.multi_sf_channel]]
+  frequency = 910375000  # Slot 7
+  bandwidth = 250000
+
+# LoRa service channel (for single-SF high-bandwidth)
+# Set to Meshtastic LongFast primary frequency
+[gateway.concentrator.lora_std]
+frequency = 906875000
+bandwidth = 250000
+spreading_factor = 11  # LongFast default
+
+
+# FSK channel (disabled — Meshtastic doesn't use FSK)
+# [gateway.concentrator.fsk]
+# frequency = 0
+# bandwidth = 0
+# datarate = 0

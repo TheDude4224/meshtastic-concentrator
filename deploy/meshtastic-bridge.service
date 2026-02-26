@@ -1,0 +1,27 @@
+[Unit]
+Description=Meshtastic Concentrator Bridge
+Documentation=https://github.com/infinihash/meshtastic-concentrator
+After=network.target chirpstack-concentratord-sx1302.service
+Requires=chirpstack-concentratord-sx1302.service
+
+[Service]
+Type=simple
+User=jason
+Group=jason
+ExecStart=/usr/bin/python3 /opt/meshtastic-concentrator/src/bridge/bridge.py \
+    --config /etc/meshtastic-bridge/config.json
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meshtastic-bridge
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/meshtastic-bridge /tmp
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

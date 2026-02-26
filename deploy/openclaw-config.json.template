@@ -1,0 +1,16 @@
+{
+  "gateway": {
+    "name": "{{GATEWAY_NAME}}",
+    "description": "FreedomFi Meshtastic/LoRa Gateway"
+  },
+  "telegram": {
+    "botToken": "{{TELEGRAM_BOT_TOKEN}}",
+    "allowedUsers": ["{{TELEGRAM_USER_ID}}"]
+  },
+  "models": {
+    "default": "anthropic/claude-sonnet-4-20250514"
+  },
+  "logging": {
+    "level": "info"
+  }
+}

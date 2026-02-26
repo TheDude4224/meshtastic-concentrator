@@ -1,0 +1,4 @@
+# Bridge dependencies
+pyzmq>=25.0
+cryptography>=41.0
+protobuf>=4.24
