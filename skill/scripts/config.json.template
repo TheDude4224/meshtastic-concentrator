@@ -1,0 +1,14 @@
+{
+  "transport": "usb",
+  "usb": {
+    "device": null
+  },
+  "tcp": {
+    "host": "localhost",
+    "port": 4403
+  },
+  "receive_timeout": 30,
+  "reconnect_attempts": 3,
+  "reconnect_delay": 5,
+  "log_level": "INFO"
+}
