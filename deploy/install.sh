@@ -1,46 +1,49 @@
 #!/usr/bin/env bash
 # =============================================================================
 # FreedomFi Gateway Provisioning Script
-# Target: Debian 12 (bookworm) on Intel Celeron J1900 w/ RAK5146 USB
+# Target: Ubuntu 24.04 / Debian 12 on Intel Celeron J1900 w/ RAK5146 USB
 # Idempotent — safe to run multiple times
+#
+# Run order:
+#   1. sudo bash install.sh          ← this script (system setup)
+#   2. bash build-concentratord.sh   ← build the concentratord binary (run as user)
+#   3. sudo bash install.sh --deploy ← deploy services (after binary is built)
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/freedomfi-install.log"
-DEPLOY_USER="jason"
+DEPLOY_USER="${SUDO_USER:-jason}"
 TIMEZONE="America/Detroit"
 NODE_MAJOR=22
+DEPLOY_MODE="${1:-}"
 
-# Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-
 log()  { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $*" | tee -a "$LOG_FILE"; }
 warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] WARN:${NC} $*" | tee -a "$LOG_FILE"; }
 err()  { echo -e "${RED}[$(date '+%H:%M:%S')] ERROR:${NC} $*" | tee -a "$LOG_FILE"; }
 die()  { err "$*"; exit 1; }
 
-# Must run as root
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
 
-log "=== FreedomFi Gateway Installer Started ==="
-log "Logging to $LOG_FILE"
+log "=== FreedomFi Gateway Installer ==="
+log "Deploy user: $DEPLOY_USER | Mode: ${DEPLOY_MODE:-full}"
 
 # ---- System basics ----
-log "Setting timezone to $TIMEZONE"
+log "Setting timezone..."
 timedatectl set-timezone "$TIMEZONE" 2>/dev/null || ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 
-log "Updating package lists..."
+log "Updating packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 
 log "Installing base packages..."
 apt-get install -y -qq \
   build-essential git curl wget gnupg2 apt-transport-https ca-certificates \
-  software-properties-common lsb-release usbutils picocom jq \
+  software-properties-common lsb-release usbutils picocom jq socat \
   python3 python3-pip python3-venv \
-  unattended-upgrades apt-listchanges \
-  systemd-timesyncd nftables \
+  protobuf-compiler libprotobuf-dev clang libclang-dev \
+  unattended-upgrades systemd-timesyncd nftables \
   >> "$LOG_FILE" 2>&1
 
 # ---- Create user ----
@@ -52,43 +55,42 @@ else
   mkdir -p "/home/$DEPLOY_USER/.ssh"
   chmod 700 "/home/$DEPLOY_USER/.ssh"
   chown -R "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh"
-  log "User created. Add SSH key to /home/$DEPLOY_USER/.ssh/authorized_keys"
 fi
-
-# Ensure dialout/plugdev membership (idempotent)
 usermod -aG sudo,dialout,plugdev "$DEPLOY_USER" 2>/dev/null || true
 
-# ---- Node.js 22 ----
+# ---- Node.js ----
 if command -v node &>/dev/null && node -v | grep -q "^v${NODE_MAJOR}\."; then
   log "Node.js $(node -v) already installed"
 else
   log "Installing Node.js $NODE_MAJOR..."
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >> "$LOG_FILE" 2>&1
   apt-get install -y -qq nodejs >> "$LOG_FILE" 2>&1
-  log "Node.js $(node -v) installed"
 fi
 
 # ---- OpenClaw ----
 if command -v openclaw &>/dev/null; then
-  log "OpenClaw already installed: $(openclaw --version 2>/dev/null || echo 'unknown')"
+  log "OpenClaw already installed"
 else
-  log "Installing OpenClaw globally via npm..."
+  log "Installing OpenClaw..."
   npm install -g openclaw >> "$LOG_FILE" 2>&1
-  log "OpenClaw installed"
 fi
 
-# ---- Python dependencies ----
+# ---- Python deps ----
 log "Installing Python packages..."
-pip3 install --break-system-packages --quiet \
-  meshtastic protobuf pyzmq 2>> "$LOG_FILE" || \
-pip3 install --quiet meshtastic protobuf pyzmq 2>> "$LOG_FILE"
+pip3 install --break-system-packages --quiet pyzmq protobuf 2>>"$LOG_FILE" || \
+pip3 install --quiet pyzmq protobuf 2>>"$LOG_FILE" || true
 
-# ---- meshtasticd (OpenSUSE Build Service) ----
+# ---- meshtastic-bridge Python deps ----
+log "Installing meshtastic-bridge deps..."
+BRIDGE_REQ="/home/$DEPLOY_USER/meshtastic-concentrator/src/bridge/requirements.txt"
+if [[ -f "$BRIDGE_REQ" ]]; then
+  pip3 install --break-system-packages --quiet -r "$BRIDGE_REQ" 2>>"$LOG_FILE" || true
+fi
+
+# ---- meshtasticd ----
 MESHTASTIC_REPO="/etc/apt/sources.list.d/meshtasticd.list"
-if [[ -f "$MESHTASTIC_REPO" ]]; then
-  log "meshtasticd repo already configured"
-else
-  log "Adding meshtasticd repository..."
+if [[ ! -f "$MESHTASTIC_REPO" ]]; then
+  log "Adding meshtasticd repo..."
   MESHTASTIC_KEY="/etc/apt/keyrings/meshtasticd.gpg"
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://download.opensuse.org/repositories/home:/meshtastic/Debian_12/Release.key" \
@@ -97,47 +99,22 @@ else
     > "$MESHTASTIC_REPO"
   apt-get update -qq >> "$LOG_FILE" 2>&1
 fi
+dpkg -l meshtasticd &>/dev/null || apt-get install -y -qq meshtasticd >> "$LOG_FILE" 2>&1
 
-if dpkg -l meshtasticd &>/dev/null; then
-  log "meshtasticd already installed"
-else
-  log "Installing meshtasticd..."
-  apt-get install -y -qq meshtasticd >> "$LOG_FILE" 2>&1
-fi
+# ---- udev rules for RAK5146 ----
+log "Setting up udev rules..."
+cat > /etc/udev/rules.d/99-rak5146.rules << 'EOF'
+# RAK5146 USB LoRa concentrator (USB Virtual COM, VID:PID 34e1:1002)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="34e1", ATTRS{idProduct}=="1002", SYMLINK+="ttyACM-rak5146", MODE="0666", GROUP="dialout"
+# Legacy FT232H variant
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", MODE="0666", GROUP="plugdev"
+EOF
+udevadm control --reload-rules 2>/dev/null || true
 
-# ---- ChirpStack Concentratord ----
-CHIRPSTACK_REPO="/etc/apt/sources.list.d/chirpstack.list"
-if [[ -f "$CHIRPSTACK_REPO" ]]; then
-  log "ChirpStack repo already configured"
-else
-  log "Adding ChirpStack repository..."
-  CHIRPSTACK_KEY="/etc/apt/keyrings/chirpstack.gpg"
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL "https://artifacts.chirpstack.io/packages/4/deb/key.gpg" \
-    | gpg --dearmor -o "$CHIRPSTACK_KEY" 2>/dev/null
-  echo "deb [signed-by=$CHIRPSTACK_KEY] https://artifacts.chirpstack.io/packages/4/deb stable main" \
-    > "$CHIRPSTACK_REPO"
-  apt-get update -qq >> "$LOG_FILE" 2>&1
-fi
-
-if dpkg -l chirpstack-concentratord &>/dev/null; then
-  log "chirpstack-concentratord already installed"
-else
-  log "Installing chirpstack-concentratord..."
-  apt-get install -y -qq chirpstack-concentratord >> "$LOG_FILE" 2>&1
-fi
-
-# Deploy concentratord config
-log "Deploying concentratord config..."
-mkdir -p /etc/chirpstack-concentratord
-cp "$SCRIPT_DIR/concentratord-config.toml" /etc/chirpstack-concentratord/concentratord.toml
-
-# ---- Networking: DHCP on all ethernet ports ----
-log "Configuring networking (DHCP on all ethernet interfaces)..."
-NETDIR="/etc/systemd/network"
-mkdir -p "$NETDIR"
-
-cat > "$NETDIR/20-wired.network" << 'EOF'
+# ---- Networking ----
+log "Configuring networking..."
+mkdir -p /etc/systemd/network
+cat > /etc/systemd/network/20-wired.network << 'EOF'
 [Match]
 Type=ether
 
@@ -150,56 +127,77 @@ UseDNS=yes
 UseNTP=yes
 RouteMetric=10
 EOF
-
 systemctl enable --now systemd-networkd >> "$LOG_FILE" 2>&1 || true
 systemctl enable --now systemd-resolved >> "$LOG_FILE" 2>&1 || true
 
-# Ensure resolv.conf is linked
-if [[ ! -L /etc/resolv.conf ]] || [[ "$(readlink /etc/resolv.conf)" != *"systemd"* ]]; then
-  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true
-fi
-
 # ---- SSH Hardening ----
 log "Hardening SSH..."
-SSHD_CONF="/etc/ssh/sshd_config.d/99-hardened.conf"
 mkdir -p /etc/ssh/sshd_config.d
-cat > "$SSHD_CONF" << 'EOF'
+cat > /etc/ssh/sshd_config.d/99-hardened.conf << EOF
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 X11Forwarding no
 MaxAuthTries 3
-AllowUsers jason
+AllowUsers $DEPLOY_USER
 EOF
-
 systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
-# ---- Unattended Upgrades ----
-log "Configuring automatic security updates..."
+# ---- Auto-updates ----
+log "Configuring unattended-upgrades..."
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 EOF
-
-cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
-Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}:${distro_codename}";
-};
-Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "false";
-EOF
-
 systemctl enable --now unattended-upgrades >> "$LOG_FILE" 2>&1 || true
 
-# ---- Systemd Services ----
+# ---- chirpstack-concentratord ----
+# NOTE: Not available via apt. Must be built from source using build-concentratord.sh
+# Check if binary is already built/installed
+CONCENTRATORD_BIN="/usr/local/bin/chirpstack-concentratord-sx1302"
+if [[ ! -f "$CONCENTRATORD_BIN" ]]; then
+  warn "chirpstack-concentratord binary not found at $CONCENTRATORD_BIN"
+  warn "Run as $DEPLOY_USER: bash ${SCRIPT_DIR}/build-concentratord.sh"
+  warn "Then re-run: sudo bash $0 --deploy"
+else
+  log "chirpstack-concentratord binary found: $($CONCENTRATORD_BIN --version 2>/dev/null)"
+fi
 
-# OpenClaw Gateway
-log "Setting up openclaw-gateway service..."
+# Deploy concentratord config
+log "Deploying concentratord config..."
+mkdir -p /etc/chirpstack-concentratord
+cp "$SCRIPT_DIR/concentratord-config.toml" /etc/chirpstack-concentratord/concentratord.toml
+
+# ---- meshtastic-bridge config ----
+log "Deploying meshtastic-bridge config..."
+mkdir -p /etc/meshtastic-bridge /var/lib/meshtastic-bridge
+BRIDGE_CONF="/etc/meshtastic-bridge/bridge-config.json"
+if [[ ! -f "$BRIDGE_CONF" ]]; then
+  cat > "$BRIDGE_CONF" << 'EOF'
+{
+  "node_id": null,
+  "long_name": "Concentrator Node",
+  "short_name": "CNOC",
+  "channel": "LongFast",
+  "region": "US",
+  "concentratord": {
+    "event_uri": "ipc:///tmp/concentratord_event",
+    "command_uri": "ipc:///tmp/concentratord_command"
+  },
+  "api": {
+    "socket_path": "/tmp/meshtastic-bridge.sock"
+  },
+  "nodedb_path": "/var/lib/meshtastic-bridge/nodedb.json"
+}
+EOF
+fi
+chown -R "$DEPLOY_USER:$DEPLOY_USER" /var/lib/meshtastic-bridge
+
+# ---- Systemd Services ----
+log "Installing systemd services..."
+
 cat > /etc/systemd/system/openclaw-gateway.service << EOF
 [Unit]
 Description=OpenClaw Gateway Agent
@@ -219,17 +217,6 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 EOF
 
-# meshtasticd service (usually installed by package, but ensure override)
-log "Configuring meshtasticd service..."
-mkdir -p /etc/systemd/system/meshtasticd.service.d
-cat > /etc/systemd/system/meshtasticd.service.d/override.conf << EOF
-[Service]
-Restart=always
-RestartSec=5
-EOF
-
-# ChirpStack Concentratord service
-log "Setting up chirpstack-concentratord service..."
 cat > /etc/systemd/system/chirpstack-concentratord.service << 'EOF'
 [Unit]
 Description=ChirpStack Concentratord (RAK5146 USB)
@@ -237,7 +224,26 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/chirpstack-concentratord-sx1302 -c /etc/chirpstack-concentratord/concentratord.toml
+ExecStart=/usr/local/bin/chirpstack-concentratord-sx1302 -c /etc/chirpstack-concentratord/concentratord.toml
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+BRIDGE_SRC="/home/$DEPLOY_USER/meshtastic-concentrator/src/bridge/bridge.py"
+cat > /etc/systemd/system/meshtastic-bridge.service << EOF
+[Unit]
+Description=Meshtastic Concentrator Bridge
+After=chirpstack-concentratord.service
+Requires=chirpstack-concentratord.service
+
+[Service]
+Type=simple
+User=$DEPLOY_USER
+ExecStart=/usr/bin/python3 ${BRIDGE_SRC} -c /etc/meshtastic-bridge/bridge-config.json -v
 Restart=always
 RestartSec=5
 
@@ -245,59 +251,48 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Reload and enable services
-log "Enabling services..."
 systemctl daemon-reload
-systemctl enable openclaw-gateway meshtasticd chirpstack-concentratord >> "$LOG_FILE" 2>&1
 
-# Deploy OpenClaw config template if no config exists
-OPENCLAW_DIR="/home/$DEPLOY_USER/.openclaw"
-if [[ ! -f "$OPENCLAW_DIR/config.json" ]]; then
-  log "Deploying OpenClaw config template..."
-  mkdir -p "$OPENCLAW_DIR"
-  cp "$SCRIPT_DIR/openclaw-config.json.template" "$OPENCLAW_DIR/config.json"
-  chown -R "$DEPLOY_USER:$DEPLOY_USER" "$OPENCLAW_DIR"
-  warn "Edit /home/$DEPLOY_USER/.openclaw/config.json with your actual values!"
+if [[ -f "$CONCENTRATORD_BIN" ]]; then
+  log "Enabling and starting all services..."
+  systemctl enable --now chirpstack-concentratord meshtastic-bridge openclaw-gateway
 else
-  log "OpenClaw config already exists, skipping template"
+  log "Enabling non-radio services..."
+  systemctl enable openclaw-gateway
+  warn "chirpstack-concentratord and meshtastic-bridge NOT started (binary missing)"
 fi
 
-# ---- USB permissions for RAK5146 ----
-log "Setting up udev rules for RAK5146 USB..."
-cat > /etc/udev/rules.d/99-rak5146.rules << 'EOF'
-# RAK5146 USB LoRa concentrator (SX1303 via USB)
-SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", MODE="0666", GROUP="plugdev"
-EOF
-udevadm control --reload-rules 2>/dev/null || true
+# ---- OpenClaw config template ----
+OPENCLAW_DIR="/home/$DEPLOY_USER/.openclaw"
+if [[ ! -f "$OPENCLAW_DIR/config.json" ]]; then
+  mkdir -p "$OPENCLAW_DIR"
+  if [[ -f "$SCRIPT_DIR/openclaw-config.json.template" ]]; then
+    cp "$SCRIPT_DIR/openclaw-config.json.template" "$OPENCLAW_DIR/config.json"
+  fi
+  chown -R "$DEPLOY_USER:$DEPLOY_USER" "$OPENCLAW_DIR"
+fi
 
 # ---- NTP ----
-log "Enabling time sync..."
 systemctl enable --now systemd-timesyncd >> "$LOG_FILE" 2>&1 || true
 
 # ---- Summary ----
 echo ""
-echo "============================================="
+echo "============================================================"
 log "=== Installation Complete ==="
-echo "============================================="
+echo "============================================================"
 echo ""
-echo "Installed components:"
-echo "  Node.js:         $(node -v 2>/dev/null || echo 'MISSING')"
-echo "  npm:             $(npm -v 2>/dev/null || echo 'MISSING')"
-echo "  OpenClaw:        $(openclaw --version 2>/dev/null || echo 'installed')"
-echo "  Python3:         $(python3 --version 2>/dev/null || echo 'MISSING')"
-echo "  meshtasticd:     $(dpkg -l meshtasticd 2>/dev/null | grep -q '^ii' && echo 'installed' || echo 'MISSING')"
-echo "  concentratord:   $(dpkg -l chirpstack-concentratord 2>/dev/null | grep -q '^ii' && echo 'installed' || echo 'MISSING')"
+echo "Component status:"
+printf "  %-30s %s\n" "Node.js:" "$(node -v 2>/dev/null || echo 'MISSING')"
+printf "  %-30s %s\n" "OpenClaw:" "$(openclaw --version 2>/dev/null || echo 'installed')"
+printf "  %-30s %s\n" "Python3:" "$(python3 --version 2>/dev/null || echo 'MISSING')"
+printf "  %-30s %s\n" "meshtasticd:" "$(dpkg -l meshtasticd 2>/dev/null | grep -q '^ii' && echo 'installed' || echo 'MISSING')"
+printf "  %-30s %s\n" "concentratord binary:" "$([[ -f $CONCENTRATORD_BIN ]] && $CONCENTRATORD_BIN --version 2>/dev/null || echo 'NOT BUILT — run build-concentratord.sh')"
 echo ""
-echo "Services (enable on boot):"
-echo "  openclaw-gateway         → systemctl start openclaw-gateway"
-echo "  meshtasticd              → systemctl start meshtasticd"
-echo "  chirpstack-concentratord → systemctl start chirpstack-concentratord"
+echo "⚠️  Manual steps required per gateway:"
+echo "  1. Add SSH pubkey: /home/$DEPLOY_USER/.ssh/authorized_keys"
+echo "  2. Configure OpenClaw: /home/$DEPLOY_USER/.openclaw/config.json"
+echo "  3. If binary not built: run 'bash deploy/build-concentratord.sh' as $DEPLOY_USER"
+echo "  4. Plug in RAK5146 USB — verify /dev/ttyACM0 present"
+echo "  5. sudo systemctl start chirpstack-concentratord meshtastic-bridge"
 echo ""
-echo "⚠️  TODO:"
-echo "  1. Add SSH public key to /home/$DEPLOY_USER/.ssh/authorized_keys"
-echo "  2. Edit /home/$DEPLOY_USER/.openclaw/config.json (fill in placeholders)"
-echo "  3. Configure meshtasticd (/etc/meshtasticd/config.yaml)"
-echo "  4. Plug in RAK5146 USB concentrator"
-echo "  5. Reboot and verify: sudo reboot"
-echo ""
-log "Full log: $LOG_FILE"
+log "Log: $LOG_FILE"
