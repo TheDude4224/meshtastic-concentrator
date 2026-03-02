@@ -125,10 +125,31 @@ class ConcentratordZMQ:
             self._context = zmq.asyncio.Context()
 
             # Subscribe to all events
-            self._event_socket = self._context.socket(zmq.SUB)
-            self._event_socket.connect(self.config.event_url)
-            self._event_socket.subscribe(b"")  # All topics
-            self._event_socket.setsockopt(zmq.RCVTIMEO, 1000)
+            # Single sync socket in a background thread feeding an asyncio Queue
+            import zmq as _zmq_sync, threading, asyncio
+            self._event_queue = asyncio.Queue()
+            self._event_loop = asyncio.get_event_loop()
+            self._zmq_sync_ctx = _zmq_sync.Context()
+            self._event_socket_sync = self._zmq_sync_ctx.socket(_zmq_sync.SUB)
+            self._event_socket_sync.connect(self.config.event_url)
+            self._event_socket_sync.subscribe(b"")
+            self._event_socket_sync.setsockopt(_zmq_sync.RCVTIMEO, 300)
+
+            def _event_reader():
+                while self._running:
+                    try:
+                        data = self._event_socket_sync.recv()
+                        asyncio.run_coroutine_threadsafe(
+                            self._event_queue.put(data), self._event_loop)
+                    except _zmq_sync.Again:
+                        pass
+                    except Exception as e:
+                        if self._running:
+                            import logging
+                            logging.getLogger(__name__).debug(f"Event reader error: {e}")
+
+            self._event_thread = threading.Thread(target=_event_reader, daemon=True)
+            self._event_thread.start()
 
             # Command socket for TX
             self._command_socket = self._context.socket(zmq.REQ)
@@ -168,22 +189,32 @@ class ConcentratordZMQ:
             return None
 
         try:
-            import zmq
-            frames = await self._event_socket.recv_multipart()
-
-            if len(frames) < 2:
+            import asyncio
+            try:
+                data = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
                 return None
 
-            # Frame 0: event type (string)
-            # Frame 1: protobuf payload
-            event_type = frames[0].decode("utf-8", errors="ignore")
+            # Decode gw.Event { event: oneof { UplinkFrame=1, GatewayStats=2, ... } }
+            # Field 1 (UplinkFrame) wire type 2 = 0x0a
+            # Field 2 (GatewayStats) wire type 2 = 0x12
+            if not data:
+                return None
 
-            if event_type == "up":
-                return self._parse_uplink(frames[1])
-            elif event_type == "stats":
+            tag = data[0]
+            if tag == 0x0a:
+                # UplinkFrame — extract inner bytes (skip tag + varint length)
+                pos = 1
+                l, s = 0, 0
+                while pos < len(data):
+                    b = data[pos]; l |= (b & 0x7F) << s; pos += 1
+                    if not (b & 0x80): break
+                    s += 7
+                return self._parse_uplink(data[pos:pos+l])
+            elif tag == 0x12:
                 logger.debug("Received gateway stats event")
             else:
-                logger.debug(f"Received event type: {event_type}")
+                logger.debug(f"Unknown event tag: {tag:#04x}")
 
             return None
 
