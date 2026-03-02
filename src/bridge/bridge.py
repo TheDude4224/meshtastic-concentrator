@@ -346,7 +346,12 @@ class ConcentratordZMQ:
                 # rx_info: UplinkRxInfo { rssi=6 (int32), snr=7 (float) }
                 rx = parse_nested(value)
                 if 6 in rx:
-                    rssi = float(rx[6]) if rx[6] < 2**31 else float(rx[6] - 2**32)
+                    # int32 negative values are varint-encoded as sign-extended int64
+                    r = rx[6]
+                    if r >= 2**63: r -= 2**64   # uint64 → int64
+                    r = r & 0xFFFFFFFF          # take lower 32 bits
+                    if r >= 2**31: r -= 2**32   # int32 sign
+                    rssi = float(r)
                 if 7 in rx:
                     import struct as _s
                     snr = _s.unpack('<f', _s.pack('<I', rx[7]))[0]
