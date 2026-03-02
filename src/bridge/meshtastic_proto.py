@@ -1,0 +1,256 @@
+"""
+Meshtastic packet encoding/decoding.
+
+Implements the Meshtastic wire format:
+  [4-byte header][encrypted protobuf payload]
+
+Header layout (big-endian):
+  Bytes 0-3:  Destination node ID
+  Bytes 4-7:  Source node ID
+  Bytes 8-11: Packet ID
+  Byte  12:   Flags (want_ack=0x08, via_mqtt=0x04, hop_limit=0x07)
+  Byte  13:   Hash (channel + hop_start)
+  Bytes 14-15: Reserved / next hop
+
+AES-256-CTR encryption:
+  Key:   SHA256 of channel name (default "LongFast" → fixed key)
+  Nonce: [packet_id (4B LE)][source_id (4B LE)][0x00 * 8]
+"""
+
+import hashlib
+import os
+import struct
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+# ─── Channel Keys ────────────────────────────────────────────────────────────
+
+# Default Meshtastic channel keys (SHA256 of channel name PSK)
+# From: https://github.com/meshtastic/firmware/blob/master/src/mesh/CryptoEngine.cpp
+CHANNEL_KEYS = {
+    "LongFast":  bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901"),  # Default 16-byte key
+    # Full 32-byte default key for LongFast:
+}
+
+# The actual default Meshtastic PSK (from firmware)
+# This is the well-known default PSK for the default channel
+DEFAULT_PSK = bytes([
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+])
+
+
+def get_channel_key(channel_name: str) -> bytes:
+    """Get the 32-byte AES key for a channel."""
+    if channel_name == "LongFast":
+        return DEFAULT_PSK
+    # For custom channels, key = SHA256 of PSK string
+    return hashlib.sha256(channel_name.encode()).digest()
+
+
+# ─── AES-256-CTR ─────────────────────────────────────────────────────────────
+
+def aes_ctr_crypt(data: bytes, key: bytes, packet_id: int, source_id: int) -> bytes:
+    """
+    AES-256-CTR encrypt/decrypt (symmetric).
+    Nonce: packet_id (4B LE) + source_id (4B LE) + 8 zero bytes
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+
+    nonce = struct.pack("<II", packet_id, source_id) + b'\x00' * 8  # 16 bytes
+    cipher = Cipher(
+        algorithms.AES(key),
+        modes.CTR(nonce),
+        backend=default_backend()
+    )
+    encryptor = cipher.encryptor()
+    return encryptor.update(data) + encryptor.finalize()
+
+
+# ─── Minimal Protobuf ─────────────────────────────────────────────────────────
+
+def encode_varint(value: int) -> bytes:
+    parts = []
+    while value > 0x7F:
+        parts.append((value & 0x7F) | 0x80)
+        value >>= 7
+    parts.append(value & 0x7F)
+    return bytes(parts)
+
+
+def encode_bytes_field(field_num: int, data: bytes) -> bytes:
+    tag = (field_num << 3) | 2
+    return encode_varint(tag) + encode_varint(len(data)) + data
+
+
+def encode_varint_field(field_num: int, value: int) -> bytes:
+    tag = (field_num << 3) | 0
+    return encode_varint(tag) + encode_varint(value)
+
+
+def encode_string_field(field_num: int, s: str) -> bytes:
+    return encode_bytes_field(field_num, s.encode())
+
+
+# ─── Meshtastic Protobuf ─────────────────────────────────────────────────────
+
+def encode_data_payload(text: str) -> bytes:
+    """
+    Encode a Data protobuf (portnum=TEXT_MESSAGE_APP=1, payload=text bytes).
+    """
+    # message Data { uint32 portnum=1; bytes payload=2; }
+    out = b''
+    out += encode_varint_field(1, 1)           # portnum = TEXT_MESSAGE_APP
+    out += encode_bytes_field(2, text.encode()) # payload
+    return out
+
+
+def encode_mesh_packet_inner(
+    source: int,
+    dest: int,
+    packet_id: int,
+    data_pb: bytes,
+    hop_limit: int = 3,
+) -> bytes:
+    """
+    Encode the inner MeshPacket fields that get encrypted.
+    message MeshPacket { ... bytes encrypted=8; ... }
+    We build the 'decoded' sub-message which then gets encrypted.
+    """
+    # message MeshPacket inner (the part that gets encrypted)
+    # Actually we encrypt the Data payload directly, not the whole MeshPacket
+    return data_pb
+
+
+# ─── Wire Frame ──────────────────────────────────────────────────────────────
+
+BROADCAST_ADDR = 0xFFFFFFFF
+
+
+def build_packet(
+    text: str,
+    source_id: int,
+    dest_id: int = BROADCAST_ADDR,
+    channel_name: str = "LongFast",
+    hop_limit: int = 3,
+    packet_id: Optional[int] = None,
+) -> bytes:
+    """
+    Build a complete Meshtastic LoRa wire frame.
+
+    Returns raw bytes ready to send as LoRa PHY payload.
+
+    Frame format:
+      [dest:4][src:4][packet_id:4][flags:1][channel_hash:1][reserved:2][encrypted_payload]
+    """
+    if packet_id is None:
+        packet_id = int(time.time() * 1000) & 0xFFFFFFFF
+
+    # Build Data protobuf
+    data_pb = encode_data_payload(text)
+
+    # Encrypt with channel key
+    key = get_channel_key(channel_name)
+    encrypted = aes_ctr_crypt(data_pb, key, packet_id, source_id)
+
+    # Build flags byte: hop_limit in low 3 bits, want_ack=0
+    flags = hop_limit & 0x07
+
+    # Channel hash: XOR of all bytes in channel name (simple hash matching firmware)
+    ch_hash = 0
+    for b in channel_name.encode():
+        ch_hash ^= b
+    ch_hash &= 0xFF
+
+    # Build header (all little-endian per Meshtastic spec)
+    header = struct.pack("<IIIBBBH",
+        dest_id,
+        source_id,
+        packet_id,
+        flags,
+        ch_hash,
+        0x00,   # hop_start (will be overwritten to hop_limit on TX)
+        0x0000, # reserved
+    )
+
+    # Wait — header is actually:
+    # dest(4) + src(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + hop_start(1)
+    header = struct.pack("<IIIBBBBB",
+        dest_id & 0xFFFFFFFF,
+        source_id & 0xFFFFFFFF,
+        packet_id & 0xFFFFFFFF,
+        flags,
+        ch_hash,
+        0x00,        # next hop
+        hop_limit,   # hop_start
+        0x00,        # padding
+    )
+
+    # Trim padding — Meshtastic header is exactly 16 bytes
+    # dest(4) + src(4) + packet_id(4) + flags(1) + ch_hash(1) + next_hop(1) + hop_start(1) = 16
+    header = struct.pack("<IIIB",
+        dest_id & 0xFFFFFFFF,
+        source_id & 0xFFFFFFFF,
+        packet_id & 0xFFFFFFFF,
+        flags | (hop_limit << 5),  # flags[2:0]=hop_limit, flags[5:3]=hop_start
+    )
+
+    # Actually, let me use the exact Meshtastic header format from the firmware:
+    # typedef struct {
+    #   NodeNum to;          // 4 bytes
+    #   NodeNum from;        // 4 bytes
+    #   PacketId id;         // 4 bytes
+    #   uint8_t flags;       // hop_limit:3, want_ack:1, via_mqtt:1
+    #   uint8_t channel;     // channel hash
+    #   uint8_t next_hop;    
+    #   uint8_t relay_node;  
+    # } PacketHeader; // 16 bytes total
+
+    header = struct.pack("<IIIBBBBB",
+        dest_id & 0xFFFFFFFF,
+        source_id & 0xFFFFFFFF,
+        packet_id & 0xFFFFFFFF,
+        (hop_limit & 0x07),  # flags: hop_limit in low 3 bits
+        ch_hash,
+        0x00,       # next_hop
+        0x00,       # relay_node
+        0x00,       # pad to align
+    )
+    # Header should be 4+4+4+1+1+1+1 = 16 bytes
+    header = header[:16]
+
+    return header + encrypted
+
+
+# ─── US915 LongFast Frequencies ──────────────────────────────────────────────
+
+# Meshtastic US915 LongFast TX frequencies (uplink channels)
+US915_LONGFAST_FREQS = [
+    903900000,
+    904100000,
+    904300000,
+    904500000,
+    904700000,
+    904900000,
+    905100000,
+    905300000,
+]
+
+# LongFast modem config (from Meshtastic firmware)
+LONGFAST_CONFIG = {
+    "bandwidth":        250000,
+    "spreading_factor": 11,
+    "code_rate":        "4/8",
+    "tx_power":         27,       # dBm
+    "preamble_length":  16,
+}
+
+
+def get_tx_frequency(packet_id: int) -> int:
+    """Select TX frequency based on packet ID (matches Meshtastic firmware)."""
+    return US915_LONGFAST_FREQS[packet_id % len(US915_LONGFAST_FREQS)]

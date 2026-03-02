@@ -193,24 +193,33 @@ class ConcentratordZMQ:
             return None
 
     async def send_downlink(self, tx: TxRequest) -> bool:
-        """Send a TX request to Concentratord."""
+        """Send a TX request to Concentratord (legacy, uses TxRequest)."""
+        from concentratord_pb import encode_downlink_frame
+        from meshtastic_proto import LONGFAST_CONFIG
+        downlink_pb = encode_downlink_frame(
+            phy_payload=tx.payload,
+            frequency=tx.frequency,
+            power=tx.tx_power,
+            bandwidth=tx.bandwidth,
+            spreading_factor=tx.spreading_factor,
+            preamble=tx.preamble_length,
+        )
+        return await self.send_downlink_raw(downlink_pb)
+
+    async def send_downlink_raw(self, command_pb: bytes) -> bool:
+        """Send a pre-encoded gw.Command protobuf to Concentratord (single ZMQ frame)."""
         if not self._command_socket or not self._running:
+            logger.error("TX: command socket not available")
             return False
 
         try:
-            # Build the downlink command
-            # ChirpStack uses protobuf, but for simplicity we'll use the
-            # JSON gateway bridge format if available, or raw protobuf
-            cmd = self._build_tx_command(tx)
-            await self._command_socket.send_multipart([b"down", cmd])
-
-            # Wait for ACK
+            await self._command_socket.send(command_pb)
             response = await self._command_socket.recv()
-            logger.debug(f"TX response: {response}")
+            logger.debug(f"TX ACK: {response.hex() if response else 'empty (ok)'}")
             return True
 
         except Exception as e:
-            logger.error(f"TX failed: {e}")
+            logger.error(f"TX send_downlink_raw failed: {e}")
             return False
 
     def _parse_uplink(self, data: bytes) -> Optional[RxPacket]:
@@ -506,31 +515,59 @@ class MeshtasticBridge:
                         channel: int = 0) -> bool:
         """Send a text message via the mesh."""
         try:
-            # TODO: Full Meshtastic encode once protocol module is ready:
-            # 1. Build Data protobuf (portnum=TEXT_MESSAGE, payload=text)
-            # 2. Build MeshPacket protobuf (source, dest, id, hopLimit)
-            # 3. Encrypt (AES256-CTR)
-            # 4. Build raw LoRa frame with Meshtastic header
+            from meshtastic_proto import build_packet, get_tx_frequency, LONGFAST_CONFIG
+            from concentratord_pb import build_command
+            import time
 
-            # For now, placeholder
-            logger.info(f"TX text to {destination:#010x}: {text[:50]}")
+            packet_id = int(time.time() * 1000) & 0xFFFFFFFF
+            channel_name = self.config.channel_name
 
-            # Build TX request
-            # tx = TxRequest(
-            #     payload=encoded_payload,
-            #     frequency=906875000,  # US915 LongFast slot 0
-            #     bandwidth=250000,
-            #     spreading_factor=11,
-            #     code_rate="4/8",
-            #     tx_power=30,
-            # )
-            # return await self.concentratord.send_downlink(tx)
+            # Build and encrypt the Meshtastic LoRa frame
+            phy_payload = build_packet(
+                text=text,
+                source_id=self.config.node_id,
+                dest_id=destination,
+                channel_name=channel_name,
+                hop_limit=3,
+                packet_id=packet_id,
+            )
 
-            self._tx_count += 1
-            return True
+            # Select TX frequency (hop based on packet ID)
+            frequency = get_tx_frequency(packet_id)
 
+            logger.info(
+                f"TX text to {destination:#010x}: \"{text[:40]}\" "
+                f"freq={frequency/1e6:.3f}MHz pkt_id={packet_id:#010x}"
+            )
+
+            # Build gw.Command protobuf (single frame for concentratord REP socket)
+            command_pb = build_command(
+                phy_payload=phy_payload,
+                frequency=frequency,
+                power=LONGFAST_CONFIG["tx_power"],
+                bandwidth=LONGFAST_CONFIG["bandwidth"],
+                spreading_factor=LONGFAST_CONFIG["spreading_factor"],
+                code_rate=LONGFAST_CONFIG["code_rate"],
+                preamble=LONGFAST_CONFIG["preamble_length"],
+                downlink_id=packet_id & 0xFFFF,
+                gateway_id="",
+            )
+
+            # Send to concentratord
+            ok = await self.concentratord.send_downlink_raw(command_pb)
+            if ok:
+                self._tx_count += 1
+                logger.info(f"TX #{self._tx_count} sent successfully ({len(phy_payload)}B)")
+            else:
+                logger.error("TX failed — concentratord rejected downlink")
+            return ok
+
+        except ImportError as e:
+            logger.error(f"TX requires cryptography package: pip install cryptography")
+            logger.error(str(e))
+            return False
         except Exception as e:
-            logger.error(f"TX failed: {e}")
+            logger.error(f"TX failed: {e}", exc_info=True)
             return False
 
     # ─── API Server ───────────────────────────────────────────────
@@ -578,7 +615,7 @@ class MeshtasticBridge:
         cmd = request.get("cmd", "")
 
         if cmd == "send":
-            text = request.get("text", "")
+            text = request.get("message", request.get("text", ""))
             dest = request.get("destination", 0xFFFFFFFF)
             channel = request.get("channel", 0)
             ok = await self.send_text(text, dest, channel)
