@@ -139,7 +139,7 @@ class ConcentratordZMQ:
             self._command_socket_sync = self._zmq_sync_ctx.socket(_zmq_sync2.REQ)
             self._command_socket_sync.connect(self.config.command_url)
             self._command_socket_sync.setsockopt(_zmq_sync2.SNDTIMEO, 5000)
-            self._command_socket_sync.setsockopt(_zmq_sync2.RCVTIMEO, 5000) instead
+            self._command_socket_sync.setsockopt(_zmq_sync2.RCVTIMEO, 5000)
 
             self._running = True
             logger.info(f"Connected to Concentratord: events={self.config.event_url}, "
