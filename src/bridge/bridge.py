@@ -125,31 +125,13 @@ class ConcentratordZMQ:
             self._context = zmq.asyncio.Context()
 
             # Subscribe to all events
-            # Single sync socket in a background thread feeding an asyncio Queue
-            import zmq as _zmq_sync, threading, asyncio
-            self._event_queue = asyncio.Queue()
-            self._event_loop = asyncio.get_event_loop()
+            # Sync ZMQ socket — polled via run_in_executor inside receive_event()
+            import zmq as _zmq_sync
             self._zmq_sync_ctx = _zmq_sync.Context()
             self._event_socket_sync = self._zmq_sync_ctx.socket(_zmq_sync.SUB)
             self._event_socket_sync.connect(self.config.event_url)
             self._event_socket_sync.subscribe(b"")
-            self._event_socket_sync.setsockopt(_zmq_sync.RCVTIMEO, 300)
-
-            def _event_reader():
-                while self._running:
-                    try:
-                        data = self._event_socket_sync.recv()
-                        asyncio.run_coroutine_threadsafe(
-                            self._event_queue.put(data), self._event_loop)
-                    except _zmq_sync.Again:
-                        pass
-                    except Exception as e:
-                        if self._running:
-                            import logging
-                            logging.getLogger(__name__).debug(f"Event reader error: {e}")
-
-            self._event_thread = threading.Thread(target=_event_reader, daemon=True)
-            self._event_thread.start()
+            self._event_socket_sync.setsockopt(_zmq_sync.RCVTIMEO, 500)
 
             # Command socket for TX
             self._command_socket = self._context.socket(zmq.REQ)
@@ -189,10 +171,11 @@ class ConcentratordZMQ:
             return None
 
         try:
-            import asyncio
+            import asyncio, zmq as _zmq
+            loop = asyncio.get_running_loop()
             try:
-                data = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+                data = await loop.run_in_executor(None, self._event_socket_sync.recv)
+            except _zmq.Again:
                 return None
 
             # Decode gw.Event { event: oneof { UplinkFrame=1, GatewayStats=2, ... } }
