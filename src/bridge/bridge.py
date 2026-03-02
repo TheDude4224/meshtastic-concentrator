@@ -433,6 +433,7 @@ class MeshtasticBridge:
         # These will be initialized from the protocol module
         self._seen_packets: dict[int, float] = {}  # packet_id -> timestamp
         self._last_rx_time: float = 0.0  # timestamp of last received packet (for LBT)
+        self._tx_lock = None  # asyncio.Lock, created lazily in send_text
         self._node_db: dict[int, dict] = {}
         self._message_log: list[dict] = []
         self._max_message_log = 1000
@@ -568,10 +569,14 @@ class MeshtasticBridge:
             from concentratord_pb import build_command
             import time, random, asyncio
 
-            # ── Jitter: random 0–3s delay to reduce collision probability ──
-            jitter = random.uniform(0.0, 3.0)
-            logger.debug(f"TX jitter: {jitter:.2f}s")
-            await asyncio.sleep(jitter)
+            # Serialize TX calls — REQ socket is half-duplex
+            if self._tx_lock is None:
+                self._tx_lock = asyncio.Lock()
+            async with self._tx_lock:
+             # ── Jitter: random 0–3s delay to reduce collision probability ──
+             jitter = random.uniform(0.0, 3.0)
+             logger.debug(f"TX jitter: {jitter:.2f}s")
+             await asyncio.sleep(jitter)
 
             # ── LBT: Listen Before Talk ──────────────────────────────────
             # If we heard a packet recently (< 1s ago), channel is likely busy.
