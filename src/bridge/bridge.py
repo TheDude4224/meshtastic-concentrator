@@ -308,12 +308,26 @@ class ConcentratordZMQ:
             else:
                 return None, None, len(buf)  # Skip unknown
 
-        # Extract fields from the protobuf
+        # Parse UplinkFrame fields (verified against chirpstack_api prost structs)
+        # field 1 = phy_payload (bytes)
+        # field 4 = tx_info (UplinkTxInfo) → field 1 = frequency
+        # field 5 = rx_info (UplinkRxInfo) → field 6 = rssi, field 7 = snr, field 2 = uplink_id
         payload = None
         rssi = -120.0
         snr = 0.0
-        frequency = 906875000
+        frequency = 904600000  # default to our std channel
         if_channel = 0
+
+        def parse_nested(buf):
+            """Parse a nested protobuf message, return dict of field_num→value."""
+            fields = {}
+            p = 0
+            while p < len(buf):
+                fn, val, p = read_field(buf, p)
+                if fn is None:
+                    break
+                fields[fn] = val
+            return fields
 
         pos = 0
         while pos < len(data):
@@ -321,19 +335,21 @@ class ConcentratordZMQ:
             if field_num is None:
                 break
 
-            # Common protobuf field mappings for gateway uplink frames
-            # These vary by Concentratord version; adjust as needed
             if field_num == 1 and isinstance(value, bytes):
-                # PHY payload (the raw LoRa frame)
                 payload = value
-            elif field_num == 11 and isinstance(value, (int, float)):
-                rssi = float(value)
-            elif field_num == 12 and isinstance(value, (int, float)):
-                snr = float(value)
-            elif field_num == 3 and isinstance(value, int):
-                frequency = value
-            elif field_num == 8 and isinstance(value, int):
-                if_channel = value
+            elif field_num == 4 and isinstance(value, bytes):
+                # tx_info: UplinkTxInfo { frequency=1 }
+                tx = parse_nested(value)
+                if 1 in tx:
+                    frequency = tx[1]
+            elif field_num == 5 and isinstance(value, bytes):
+                # rx_info: UplinkRxInfo { rssi=6 (int32), snr=7 (float) }
+                rx = parse_nested(value)
+                if 6 in rx:
+                    rssi = float(rx[6]) if rx[6] < 2**31 else float(rx[6] - 2**32)
+                if 7 in rx:
+                    import struct as _s
+                    snr = _s.unpack('<f', _s.pack('<I', rx[7]))[0]
 
         if payload is None:
             return None
