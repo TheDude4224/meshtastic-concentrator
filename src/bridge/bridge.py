@@ -688,7 +688,7 @@ class MeshtasticBridge:
             # Track pending ACKs: store packet_id → sent_time
             if not hasattr(self, '_pending_acks'):
                 self._pending_acks: dict[int, float] = {}
-            MAX_RETRIES = 2
+            MAX_RETRIES = 30
             ACK_TIMEOUT = 3.0  # seconds
 
             ok = False
