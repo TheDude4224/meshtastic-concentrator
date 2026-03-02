@@ -158,6 +158,10 @@ class ConcentratordZMQ:
         self._running = False
         if self._event_socket:
             self._event_socket.close()
+        if hasattr(self, '_event_socket_sync') and self._event_socket_sync:
+            self._event_socket_sync.close()
+        if hasattr(self, '_command_socket_sync') and self._command_socket_sync:
+            self._command_socket_sync.close()
         if self._command_socket:
             self._command_socket.close()
         if self._context:
@@ -169,7 +173,7 @@ class ConcentratordZMQ:
         Receive next event from Concentratord.
         Returns RxPacket for uplink frames, None for other events or timeout.
         """
-        if not self._event_socket or not self._running:
+        if not self._event_socket_sync or not self._running:
             return None
 
         try:
