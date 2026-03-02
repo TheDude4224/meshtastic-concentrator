@@ -258,3 +258,142 @@ STD_CHANNEL_FREQ = 904_600_000  # Hz
 def get_tx_frequency(packet_id: int) -> int:
     """TX on the Std LoRa channel (250kHz SF11) so concentratord can also receive our packets."""
     return STD_CHANNEL_FREQ
+
+
+# ─── DECODER ──────────────────────────────────────────────────────────────────
+
+def read_varint(buf: bytes, pos: int):
+    """Read a protobuf varint. Returns (value, new_pos)."""
+    result = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80): break
+        shift += 7
+    return result, pos
+
+def read_field(buf: bytes, pos: int):
+    """Read one protobuf field. Returns (field_num, wire_type, value, new_pos) or None."""
+    import struct
+    if pos >= len(buf): return None
+    tag, pos = read_varint(buf, pos)
+    fn = tag >> 3; wt = tag & 7
+    if wt == 0:
+        v, pos = read_varint(buf, pos)
+        return fn, 0, v, pos
+    elif wt == 1:
+        v = struct.unpack_from('<q', buf, pos)[0]; return fn, 1, v, pos+8
+    elif wt == 2:
+        l, pos = read_varint(buf, pos); v = buf[pos:pos+l]; return fn, 2, v, pos+l
+    elif wt == 5:
+        v = struct.unpack_from('<I', buf, pos)[0]; return fn, 5, v, pos+4
+    return None
+
+def parse_fields(buf: bytes) -> dict:
+    """Parse all protobuf fields in buf into a dict field_num→value (last wins)."""
+    out = {}; pos = 0
+    while pos < len(buf):
+        r = read_field(buf, pos)
+        if r is None: break
+        fn, wt, v, pos = r
+        out[fn] = v
+    return out
+
+def decode_packet(phy_payload: bytes, channel_name: str = "LongFast") -> dict:
+    """
+    Decode a received Meshtastic LoRa packet.
+    Returns dict with: src, dst, packet_id, hop_limit, hop_start,
+                       want_ack, portnum, text (if TEXT_MESSAGE), raw_payload, error
+    """
+    import struct
+
+    result = {"error": None, "text": None, "portnum": None,
+              "src": None, "dst": None, "packet_id": None}
+
+    # Meshtastic LoRa PHY frame layout (little-endian):
+    # [0..3]  dst (uint32 LE)
+    # [4..7]  src (uint32 LE)
+    # [8..11] packet_id (uint32 LE)
+    # [12]    flags (hop_limit:3, want_ack:1, via_mqtt:1, hop_start:3)
+    # [13]    channel hash (uint8)
+    # [14..N] encrypted payload (varies)
+    if len(phy_payload) < 16:
+        result["error"] = f"too short ({len(phy_payload)}B)"
+        return result
+
+    dst      = struct.unpack_from('<I', phy_payload, 0)[0]
+    src      = struct.unpack_from('<I', phy_payload, 4)[0]
+    pkt_id   = struct.unpack_from('<I', phy_payload, 8)[0]
+    flags    = phy_payload[12]
+    hop_limit  = flags & 0x07
+    want_ack   = bool(flags & 0x08)
+    via_mqtt   = bool(flags & 0x10)
+    hop_start  = (flags >> 5) & 0x07
+    chan_hash  = phy_payload[13]
+    encrypted  = phy_payload[14:]
+
+    result.update({
+        "dst": dst, "src": src, "packet_id": pkt_id,
+        "hop_limit": hop_limit, "hop_start": hop_start,
+        "want_ack": want_ack, "via_mqtt": via_mqtt,
+        "chan_hash": chan_hash,
+    })
+
+    # Decrypt
+    try:
+        key = get_channel_key(channel_name)
+        plaintext = aes_ctr_crypt(encrypted, key, pkt_id, src)
+    except Exception as e:
+        result["error"] = f"decrypt failed: {e}"
+        return result
+
+    # Parse Data protobuf (MeshPacket.decoded = Data)
+    # Data fields: portnum=1(varint), payload=2(bytes), want_response=5(bool),
+    #              dest=6, source=7, request_id=8, reply_id=9, emoji=10,
+    #              bitfield=101
+    try:
+        fields = parse_fields(plaintext)
+        portnum = fields.get(1, 0)
+        payload = fields.get(2, b'')
+        result["portnum"] = portnum
+
+        # portnum 1 = TEXT_MESSAGE_APP
+        if portnum == 1 and isinstance(payload, bytes):
+            result["text"] = payload.decode('utf-8', errors='replace')
+
+        # portnum 3 = POSITION_APP
+        elif portnum == 3 and isinstance(payload, bytes):
+            pf = parse_fields(payload)
+            lat = pf.get(1, 0); lon = pf.get(2, 0); alt = pf.get(3, 0)
+            # Meshtastic stores lat/lon as integer * 1e7
+            if lat >= 2**31: lat -= 2**32
+            if lon >= 2**31: lon -= 2**32
+            result["position"] = {"lat": lat/1e7, "lon": lon/1e7, "alt": alt}
+
+        # portnum 4 = NODEINFO_APP
+        elif portnum == 4 and isinstance(payload, bytes):
+            nf = parse_fields(payload)
+            result["nodeinfo"] = {
+                "id":       nf.get(1, b'').decode('utf-8', errors='replace') if isinstance(nf.get(1), bytes) else '',
+                "longname": nf.get(2, b'').decode('utf-8', errors='replace') if isinstance(nf.get(2), bytes) else '',
+                "shortname":nf.get(3, b'').decode('utf-8', errors='replace') if isinstance(nf.get(3), bytes) else '',
+            }
+
+        result["raw_payload"] = plaintext.hex()
+    except Exception as e:
+        result["error"] = f"protobuf parse failed: {e}"
+
+    return result
+
+
+PORTNUM_NAMES = {
+    0: "UNKNOWN", 1: "TEXT", 2: "REMOTE_HARDWARE", 3: "POSITION",
+    4: "NODEINFO", 5: "ROUTING", 6: "ADMIN", 7: "TEXT_BELL",
+    32: "WAYPOINT", 33: "AUDIO", 34: "DETECTION_SENSOR",
+    65: "REPLY", 66: "IP_TUNNEL", 67: "PAXCOUNTER",
+    67: "SERIAL", 68: "STORE_FORWARD", 69: "RANGE_TEST",
+    70: "TELEMETRY", 71: "ZPS", 72: "SIMULATOR", 73: "TRACEROUTE",
+    74: "NEIGHBORINFO", 75: "ATAK", 76: "MAP_REPORT",
+    256: "PRIVATE", 257: "ATAK_FORWARDER",
+}

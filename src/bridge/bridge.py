@@ -539,19 +539,75 @@ class MeshtasticBridge:
                 if now - v < 300
             }
 
-            # TODO: Full Meshtastic decode once protocol module is ready:
-            # 1. Parse header (dest, source, packet_id, flags)
-            # 2. Decrypt payload (AES256-CTR)
-            # 3. Decode protobuf (MeshPacket → Data → text/position/etc)
-            # 4. Update node database
-            # 5. Make rebroadcast decision
-            # 6. Notify API clients
+            # Decode Meshtastic packet
+            from meshtastic_proto import decode_packet, PORTNUM_NAMES
+            decoded = decode_packet(rx.payload, self.config.channel_name)
 
-            logger.info(
-                f"RX #{self._rx_count}: {len(rx.payload)}B "
-                f"ch={rx.if_channel} rssi={rx.rssi:.0f} snr={rx.snr:.1f} "
-                f"freq={rx.frequency/1e6:.3f}MHz"
-            )
+            src_hex = f"!{decoded['src']:08x}" if decoded.get('src') else "?"
+            dst_hex = f"!{decoded['dst']:08x}" if decoded.get('dst') else "?"
+            pn = PORTNUM_NAMES.get(decoded.get('portnum', 0), f"port{decoded.get('portnum','?')}")
+
+            log_parts = [
+                f"RX #{self._rx_count}: {len(rx.payload)}B",
+                f"ch={rx.if_channel} rssi={rx.rssi:.0f} snr={rx.snr:.1f}",
+                f"freq={rx.frequency/1e6:.3f}MHz",
+            ]
+            if decoded.get('src'):
+                log_parts.append(f"src={src_hex} dst={dst_hex} [{pn}]")
+            if decoded.get('text'):
+                log_parts.append(f"msg={decoded['text']!r}")
+            elif decoded.get('position'):
+                p = decoded['position']
+                log_parts.append(f"pos={p['lat']:.5f},{p['lon']:.5f} alt={p['alt']}m")
+            elif decoded.get('nodeinfo'):
+                ni = decoded['nodeinfo']
+                log_parts.append(f"node={ni['longname']!r} ({ni['shortname']})")
+            elif decoded.get('error'):
+                log_parts.append(f"decode_err={decoded['error']}")
+            logger.info(" ".join(log_parts))
+
+            # Update node database from decoded info
+            if decoded.get('src') and not decoded.get('error'):
+                node_entry = self._nodes.get(decoded['src'], {})
+                node_entry['last_rssi'] = rx.rssi
+                node_entry['last_snr'] = rx.snr
+                node_entry['last_seen'] = now
+                if decoded.get('nodeinfo'):
+                    ni = decoded['nodeinfo']
+                    node_entry['long_name'] = ni['longname']
+                    node_entry['short_name'] = ni['shortname']
+                self._nodes[decoded['src']] = node_entry
+
+            # Enrich packet_data with decoded fields
+            if decoded.get('src'):
+                packet_data.update({
+                    "src": src_hex, "dst": dst_hex,
+                    "portnum": pn, "packet_id": decoded.get('packet_id'),
+                })
+            if decoded.get('text'):
+                packet_data["text"] = decoded["text"]
+            elif decoded.get('position'):
+                packet_data["position"] = decoded["position"]
+            elif decoded.get('nodeinfo'):
+                packet_data["nodeinfo"] = decoded["nodeinfo"]
+
+            # Clear pending ACK if this is a ROUTING reply matching one of our packets
+            if hasattr(self, '_pending_acks') and decoded.get('portnum') == 5:
+                reply_id = decoded.get('raw_payload', '')
+                # Routing packet: check if request_id field (8) matches our pending
+                try:
+                    from meshtastic_proto import parse_fields as _pf
+                    import binascii
+                    raw = bytes.fromhex(decoded.get('raw_payload',''))
+                    rf = _pf(raw)
+                    routing_inner = rf.get(2, b'')  # payload bytes
+                    ri = _pf(routing_inner) if isinstance(routing_inner, bytes) else {}
+                    req_id = ri.get(8, None)  # request_id in Routing
+                    if req_id and req_id in self._pending_acks:
+                        logger.info(f"ACK received for packet {req_id:#010x}")
+                        self._pending_acks.pop(req_id, None)
+                except Exception:
+                    pass
 
             # Store in message log
             self._message_log.append(packet_data)
@@ -628,13 +684,39 @@ class MeshtasticBridge:
                 gateway_id="",
             )
 
-            # Send to concentratord
-            ok = await self.concentratord.send_downlink_raw(command_pb)
-            if ok:
-                self._tx_count += 1
-                logger.info(f"TX #{self._tx_count} sent successfully ({len(phy_payload)}B)")
-            else:
-                logger.error("TX failed — concentratord rejected downlink")
+            # ── Retransmit with ACK tracking ─────────────────────────────
+            # Track pending ACKs: store packet_id → sent_time
+            if not hasattr(self, '_pending_acks'):
+                self._pending_acks: dict[int, float] = {}
+            MAX_RETRIES = 2
+            ACK_TIMEOUT = 3.0  # seconds
+
+            ok = False
+            for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+                ok = await self.concentratord.send_downlink_raw(command_pb)
+                if ok:
+                    self._tx_count += 1
+                    self._pending_acks[packet_id] = time.time()
+                    retry_label = f" (retry {attempt-1}/{MAX_RETRIES})" if attempt > 1 else ""
+                    logger.info(f"TX #{self._tx_count} sent successfully ({len(phy_payload)}B){retry_label}")
+                    # Wait for ACK (check _pending_acks; cleared by process_rx on ROUTING packet)
+                    ack_deadline = time.time() + ACK_TIMEOUT
+                    while time.time() < ack_deadline:
+                        if packet_id not in self._pending_acks:
+                            logger.info(f"TX #{self._tx_count} ACK received ✓")
+                            return True
+                        await asyncio.sleep(0.1)
+                    # No ACK received
+                    if attempt <= MAX_RETRIES:
+                        logger.warning(f"TX #{self._tx_count} no ACK, retrying ({attempt}/{MAX_RETRIES})...")
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                    else:
+                        logger.warning(f"TX #{self._tx_count} no ACK after {MAX_RETRIES} retries (broadcast ok)")
+                        self._pending_acks.pop(packet_id, None)
+                else:
+                    logger.error(f"TX attempt {attempt} failed — concentratord rejected downlink")
+                    if attempt > MAX_RETRIES: break
+                    await asyncio.sleep(1.0)
             return ok
 
         except ImportError as e:
