@@ -228,7 +228,7 @@ class ConcentratordZMQ:
 
     async def send_downlink_raw(self, command_pb: bytes) -> bool:
         """Send a pre-encoded gw.Command protobuf to Concentratord (single ZMQ frame)."""
-        if not self._command_socket or not self._running:
+        if not hasattr(self, "_command_socket_sync") or not self._command_socket_sync or not self._running:
             logger.error("TX: command socket not available")
             return False
 
