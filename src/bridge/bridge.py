@@ -134,10 +134,12 @@ class ConcentratordZMQ:
             self._event_socket_sync.setsockopt(_zmq_sync.RCVTIMEO, 500)
 
             # Command socket for TX
-            self._command_socket = self._context.socket(zmq.REQ)
-            self._command_socket.connect(self.config.command_url)
-            self._command_socket.setsockopt(zmq.SNDTIMEO, 5000)
-            # Note: do NOT set RCVTIMEO on async socket — use asyncio.wait_for instead
+            # Sync command socket — avoids asyncio ZMQ deadlock issues
+            import zmq as _zmq_sync2
+            self._command_socket_sync = self._zmq_sync_ctx.socket(_zmq_sync2.REQ)
+            self._command_socket_sync.connect(self.config.command_url)
+            self._command_socket_sync.setsockopt(_zmq_sync2.SNDTIMEO, 5000)
+            self._command_socket_sync.setsockopt(_zmq_sync2.RCVTIMEO, 5000) instead
 
             self._running = True
             logger.info(f"Connected to Concentratord: events={self.config.event_url}, "
@@ -228,8 +230,13 @@ class ConcentratordZMQ:
 
         try:
             import asyncio
-            await self._command_socket.send(command_pb)
-            response = await asyncio.wait_for(self._command_socket.recv(), timeout=5.0)
+            loop = asyncio.get_running_loop()
+
+            def _do_tx():
+                self._command_socket_sync.send(command_pb)
+                return self._command_socket_sync.recv()
+
+            response = await loop.run_in_executor(None, _do_tx)
             logger.debug(f"TX ACK: {response.hex() if response else 'empty (ok)'}")
             return True
 
