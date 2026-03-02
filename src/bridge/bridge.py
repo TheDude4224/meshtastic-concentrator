@@ -134,7 +134,7 @@ class ConcentratordZMQ:
             self._command_socket = self._context.socket(zmq.REQ)
             self._command_socket.connect(self.config.command_url)
             self._command_socket.setsockopt(zmq.SNDTIMEO, 5000)
-            self._command_socket.setsockopt(zmq.RCVTIMEO, 5000)
+            # Note: do NOT set RCVTIMEO on async socket — use asyncio.wait_for instead
 
             self._running = True
             logger.info(f"Connected to Concentratord: events={self.config.event_url}, "
@@ -213,8 +213,9 @@ class ConcentratordZMQ:
             return False
 
         try:
+            import asyncio
             await self._command_socket.send(command_pb)
-            response = await self._command_socket.recv()
+            response = await asyncio.wait_for(self._command_socket.recv(), timeout=5.0)
             logger.debug(f"TX ACK: {response.hex() if response else 'empty (ok)'}")
             return True
 
