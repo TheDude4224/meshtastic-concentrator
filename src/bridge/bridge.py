@@ -691,15 +691,23 @@ class MeshtasticBridge:
             MAX_RETRIES = 30
             ACK_TIMEOUT = 3.0  # seconds
 
+            is_broadcast = (destination == 0xFFFFFFFF)
+
             ok = False
             for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
                 ok = await self.concentratord.send_downlink_raw(command_pb)
                 if ok:
                     self._tx_count += 1
-                    self._pending_acks[packet_id] = time.time()
                     retry_label = f" (retry {attempt-1}/{MAX_RETRIES})" if attempt > 1 else ""
                     logger.info(f"TX #{self._tx_count} sent successfully ({len(phy_payload)}B){retry_label}")
-                    # Wait for ACK (check _pending_acks; cleared by process_rx on ROUTING packet)
+
+                    # Broadcasts: fire-and-forget, no ACK expected
+                    if is_broadcast:
+                        logger.debug("TX broadcast — no ACK expected, done")
+                        return True
+
+                    # Unicast: wait for ACK then retry if needed
+                    self._pending_acks[packet_id] = time.time()
                     ack_deadline = time.time() + ACK_TIMEOUT
                     while time.time() < ack_deadline:
                         if packet_id not in self._pending_acks:
@@ -711,7 +719,7 @@ class MeshtasticBridge:
                         logger.warning(f"TX #{self._tx_count} no ACK, retrying ({attempt}/{MAX_RETRIES})...")
                         await asyncio.sleep(random.uniform(0.5, 1.5))
                     else:
-                        logger.warning(f"TX #{self._tx_count} no ACK after {MAX_RETRIES} retries (broadcast ok)")
+                        logger.warning(f"TX #{self._tx_count} no ACK after {MAX_RETRIES} retries")
                         self._pending_acks.pop(packet_id, None)
                 else:
                     logger.error(f"TX attempt {attempt} failed — concentratord rejected downlink")
