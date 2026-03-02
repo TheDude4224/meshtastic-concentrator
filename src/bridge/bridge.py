@@ -432,6 +432,7 @@ class MeshtasticBridge:
 
         # These will be initialized from the protocol module
         self._seen_packets: dict[int, float] = {}  # packet_id -> timestamp
+        self._last_rx_time: float = 0.0  # timestamp of last received packet (for LBT)
         self._node_db: dict[int, dict] = {}
         self._message_log: list[dict] = []
         self._max_message_log = 1000
@@ -500,6 +501,7 @@ class MeshtasticBridge:
     async def _process_rx(self, rx: RxPacket):
         """Process a received LoRa packet."""
         self._rx_count += 1
+        self._last_rx_time = time.time()  # update LBT channel-busy tracker
 
         # Check if this looks like a Meshtastic packet
         # Meshtastic packets have a specific structure after LoRa demodulation
@@ -564,7 +566,28 @@ class MeshtasticBridge:
         try:
             from meshtastic_proto import build_packet, get_tx_frequency, LONGFAST_CONFIG
             from concentratord_pb import build_command
-            import time
+            import time, random, asyncio
+
+            # ── Jitter: random 0–3s delay to reduce collision probability ──
+            jitter = random.uniform(0.0, 3.0)
+            logger.debug(f"TX jitter: {jitter:.2f}s")
+            await asyncio.sleep(jitter)
+
+            # ── LBT: Listen Before Talk ──────────────────────────────────
+            # If we heard a packet recently (< 1s ago), channel is likely busy.
+            # Back off with exponential delay and retry up to 3 times.
+            LBT_BUSY_WINDOW = 1.0   # seconds: channel considered busy if RX within this window
+            LBT_BACKOFF_BASE = 0.5  # seconds: base backoff
+            LBT_MAX_TRIES = 3
+            for attempt in range(LBT_MAX_TRIES):
+                age = time.time() - self._last_rx_time
+                if age >= LBT_BUSY_WINDOW:
+                    break  # channel clear
+                backoff = LBT_BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.5)
+                logger.debug(f"LBT: channel busy (last RX {age:.2f}s ago), backoff {backoff:.2f}s (attempt {attempt+1}/{LBT_MAX_TRIES})")
+                await asyncio.sleep(backoff)
+            else:
+                logger.warning("LBT: channel still busy after max retries, transmitting anyway")
 
             packet_id = int(time.time() * 1000) & 0xFFFFFFFF
             channel_name = self.config.channel_name
@@ -579,7 +602,7 @@ class MeshtasticBridge:
                 packet_id=packet_id,
             )
 
-            # Select TX frequency (hop based on packet ID)
+            # Select TX frequency
             frequency = get_tx_frequency(packet_id)
 
             logger.info(
@@ -587,7 +610,7 @@ class MeshtasticBridge:
                 f"freq={frequency/1e6:.3f}MHz pkt_id={packet_id:#010x}"
             )
 
-            # Build gw.Command protobuf (single frame for concentratord REP socket)
+            # Build gw.Command protobuf
             command_pb = build_command(
                 phy_payload=phy_payload,
                 frequency=frequency,
