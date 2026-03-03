@@ -432,6 +432,7 @@ class MeshtasticBridge:
 
         # These will be initialized from the protocol module
         self._seen_packets: dict[int, float] = {}  # packet_id -> timestamp
+        self._nodes: dict = {}  # node_id -> {long_name, short_name, last_rssi, last_snr, last_seen}
         self._last_rx_time: float = 0.0  # timestamp of last received packet (for LBT)
         self._tx_lock = None  # asyncio.Lock, created lazily in send_text
         self._node_db: dict[int, dict] = {}

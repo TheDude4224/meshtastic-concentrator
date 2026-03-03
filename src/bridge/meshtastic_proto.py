@@ -318,7 +318,8 @@ def decode_packet(phy_payload: bytes, channel_name: str = "LongFast") -> dict:
     # [12]    flags (hop_limit:3, want_ack:1, via_mqtt:1, hop_start:3)
     # [13]    channel hash (uint8)
     # [14..N] encrypted payload (varies)
-    if len(phy_payload) < 16:
+    # Header: dst(4)+src(4)+packet_id(4)+flags(1)+chan_hash(1)+reserved(2) = 16 bytes
+    if len(phy_payload) < 17:
         result["error"] = f"too short ({len(phy_payload)}B)"
         return result
 
@@ -331,7 +332,8 @@ def decode_packet(phy_payload: bytes, channel_name: str = "LongFast") -> dict:
     via_mqtt   = bool(flags & 0x10)
     hop_start  = (flags >> 5) & 0x07
     chan_hash  = phy_payload[13]
-    encrypted  = phy_payload[14:]
+    # bytes 14-15 = reserved
+    encrypted  = phy_payload[16:]
 
     result.update({
         "dst": dst, "src": src, "packet_id": pkt_id,
