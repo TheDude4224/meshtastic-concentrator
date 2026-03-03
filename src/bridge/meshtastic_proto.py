@@ -30,7 +30,7 @@ from typing import Optional
 # Default Meshtastic channel keys (SHA256 of channel name PSK)
 # From: https://github.com/meshtastic/firmware/blob/master/src/mesh/CryptoEngine.cpp
 CHANNEL_KEYS = {
-    "OryahComms": bytes.fromhex("fd86f2f9384b2e71c0f4eb9240204a30fd86f2f9384b2e71c0f4eb9240204a30"),
+    "OryahComms": bytes.fromhex("fd86f2f9384b2e71c0f4eb9240204a3000000000000000000000000000000000"),  # 128-bit zero-padded to 256
     "LongFast":  bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901"),  # Default 16-byte key
     # Full 32-byte default key for LongFast:
 }
@@ -46,10 +46,13 @@ DEFAULT_PSK = bytes([
 
 
 def get_channel_key(channel_name: str) -> bytes:
-    """Get the 32-byte AES key for a channel."""
+    """Get the 32-byte AES key for a channel (zero-padded to 32 bytes per Meshtastic firmware)."""
     if channel_name == "LongFast":
         return DEFAULT_PSK
-    # For custom channels, key = SHA256 of PSK string
+    if channel_name in CHANNEL_KEYS:
+        k = CHANNEL_KEYS[channel_name]
+        return k + bytes(32 - len(k)) if len(k) < 32 else k
+    # Unknown channel: derive from SHA256
     return hashlib.sha256(channel_name.encode()).digest()
 
 
@@ -162,9 +165,10 @@ def build_packet(
     # Build flags byte: hop_limit in low 3 bits, want_ack=0
     flags = hop_limit & 0x07
 
-    # Channel hash: XOR of all bytes in channel name (simple hash matching firmware)
+    # Channel hash: XOR of PSK bytes (matches Meshtastic firmware generateHash())
+    key = get_channel_key(channel_name)
     ch_hash = 0
-    for b in channel_name.encode():
+    for b in key[:16]:  # firmware uses psk.length (original key length, not expanded)
         ch_hash ^= b
     ch_hash &= 0xFF
 
