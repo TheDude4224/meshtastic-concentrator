@@ -30,7 +30,7 @@ from typing import Optional
 # Default Meshtastic channel keys (SHA256 of channel name PSK)
 # From: https://github.com/meshtastic/firmware/blob/master/src/mesh/CryptoEngine.cpp
 CHANNEL_KEYS = {
-    "OryahComms": bytes.fromhex("fd86f2f9384b2e71c0f4eb9240204a3000000000000000000000000000000000"),  # 128-bit zero-padded to 256
+    "OryahComms": bytes.fromhex("fd86f2f9384b2e71c0f4eb9240204a30"),  # 128-bit key → AES-128
     "LongFast":  bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901"),  # Default 16-byte key
     # Full 32-byte default key for LongFast:
 }
@@ -50,25 +50,27 @@ def get_channel_key(channel_name: str) -> bytes:
     if channel_name == "LongFast":
         return DEFAULT_PSK
     if channel_name in CHANNEL_KEYS:
-        k = CHANNEL_KEYS[channel_name]
-        return k + bytes(32 - len(k)) if len(k) < 32 else k
+        return CHANNEL_KEYS[channel_name]  # return as-is; aes_ctr_crypt picks 128 or 256
     # Unknown channel: derive from SHA256
     return hashlib.sha256(channel_name.encode()).digest()
 
 
-# ─── AES-256-CTR ─────────────────────────────────────────────────────────────
+# ─── AES CTR (128 or 256 depending on key length, matching Meshtastic firmware) ──
 
 def aes_ctr_crypt(data: bytes, key: bytes, packet_id: int, source_id: int) -> bytes:
     """
-    AES-256-CTR encrypt/decrypt (symmetric).
+    AES-CTR encrypt/decrypt (symmetric). Uses AES-128 for 16B keys, AES-256 for 32B keys.
+    Meshtastic firmware: encryptAESCtr uses mbedtls_aes_setkey_enc with keyLen*8 bits.
     Nonce: packet_id (4B LE) + source_id (4B LE) + 8 zero bytes
     """
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.backends import default_backend
 
     nonce = struct.pack("<II", packet_id, source_id) + b'\x00' * 8  # 16 bytes
+    # Use key as-is: AES-128 for 16B, AES-256 for 32B
+    aes_key = key[:16] if len(key) == 16 else key[:32]
     cipher = Cipher(
-        algorithms.AES(key),
+        algorithms.AES(aes_key),
         modes.CTR(nonce),
         backend=default_backend()
     )
