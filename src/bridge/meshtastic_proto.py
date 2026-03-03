@@ -30,6 +30,7 @@ from typing import Optional
 # Default Meshtastic channel keys (SHA256 of channel name PSK)
 # From: https://github.com/meshtastic/firmware/blob/master/src/mesh/CryptoEngine.cpp
 CHANNEL_KEYS = {
+    "OryahComms": bytes.fromhex("fd86f2f9384b2e71c0f4eb9240204a30fd86f2f9384b2e71c0f4eb9240204a30"),
     "LongFast":  bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901"),  # Default 16-byte key
     # Full 32-byte default key for LongFast:
 }

@@ -782,7 +782,11 @@ class MeshtasticBridge:
 
         if cmd == "send":
             text = request.get("message", request.get("text", ""))
-            dest = request.get("destination", 0xFFFFFFFF)
+            dest_raw = request.get("destination", 0xFFFFFFFF)
+            if isinstance(dest_raw, str):
+                dest = int(dest_raw, 16) if dest_raw.startswith("0x") else int(dest_raw)
+            else:
+                dest = int(dest_raw)
             channel = request.get("channel", 0)
             ok = await self.send_text(text, dest, channel)
             return {"status": "ok" if ok else "error"}
