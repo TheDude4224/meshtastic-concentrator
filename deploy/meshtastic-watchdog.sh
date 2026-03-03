@@ -3,7 +3,7 @@
 # Sends a beacon every run, checks if we've received anything recently
 # Triggers recovery if RX has been stuck > RX_STUCK_MINUTES
 
-RX_STUCK_MINUTES=3
+RX_STUCK_MINUTES=5
 LOG_TAG="meshtastic-watchdog"
 BRIDGE_SOCK="/tmp/meshtastic-bridge.sock"
 STATE_DIR="/var/lib/meshtastic-watchdog"
@@ -39,10 +39,12 @@ if [ "$SERVICE_UPTIME" -lt $(( RX_STUCK_MINUTES * 60 )) ]; then
     exit 0
 fi
 
-# --- Check RX health ---
-RX_COUNT=$(journalctl -u meshtastic-bridge --no-pager \
+# --- Check RX health via concentratord stats ---
+RX_COUNT=$(journalctl -u chirpstack-concentratord --no-pager \
     --since "${RX_STUCK_MINUTES} minutes ago" 2>/dev/null \
-    | grep -c "RX #")
+    | grep "rx_received:" \
+    | awk -F"rx_received: " "{print \$2}" \
+    | awk -F"," "{sum+=\$1} END {print sum+0}")
 
 if [ "$RX_COUNT" -gt 0 ]; then
     log "RX healthy: ${RX_COUNT} packets in last ${RX_STUCK_MINUTES}min"
@@ -56,8 +58,8 @@ RECOVERY_COUNT=$(( RECOVERY_COUNT + 1 ))
 echo "$RECOVERY_COUNT" > "$RECOVERY_COUNT_FILE"
 
 if [ "$RECOVERY_COUNT" -gt 5 ]; then
-    log "ERROR: Recovery attempted $RECOVERY_COUNT times, still stuck — needs physical inspection"
-    exit 1
+    log "WARNING: Recovery attempted $RECOVERY_COUNT times — hardware may need inspection"
+    # Don't exit — keep trying, hardware often recovers
 fi
 
 log "WARNING: Zero RX for ${RX_STUCK_MINUTES}min — recovery attempt #${RECOVERY_COUNT} (${NODE_TYPE})"
