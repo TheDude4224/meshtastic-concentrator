@@ -1,0 +1,8 @@
+[Unit]
+Description=Meshtastic RX Health Watchdog
+After=meshtastic-bridge.service chirpstack-concentratord.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/meshtastic-watchdog.sh
+User=root
