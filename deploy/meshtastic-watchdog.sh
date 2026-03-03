@@ -3,7 +3,7 @@
 # Sends a beacon every run, checks if we've received anything recently
 # Triggers recovery if RX has been stuck > RX_STUCK_MINUTES
 
-RX_STUCK_MINUTES=10
+RX_STUCK_MINUTES=3
 LOG_TAG="meshtastic-watchdog"
 BRIDGE_SOCK="/tmp/meshtastic-bridge.sock"
 STATE_DIR="/var/lib/meshtastic-watchdog"
@@ -21,11 +21,11 @@ else
     NODE_TYPE="spi"
 fi
 
-# --- Send beacon (keeps traffic flowing so RX can be validated) ---
-if [ -S "$BRIDGE_SOCK" ]; then
+# --- Beacon: USB nodes skip TX (TX stalls SX1250 RF switch); SPI nodes beacon
+if [ "$NODE_TYPE" = "spi" ] && [ -S "$BRIDGE_SOCK" ]; then
     echo '{"cmd":"send","message":"watchdog-beacon","destination":"0xffffffff"}' \
         | socat -T2 - UNIX-CONNECT:"$BRIDGE_SOCK" >/dev/null 2>&1 \
-        && log "Beacon sent (${NODE_TYPE})"
+        && log "Beacon sent (spi)"
 fi
 
 # --- Check service uptime (skip recovery if just started) ---
@@ -67,9 +67,9 @@ sleep 2
 
 if [ "$NODE_TYPE" = "usb" ]; then
     log "USB power cycle on ${USB_DEV}..."
-    echo 0 > /sys/bus/usb/devices/${USB_DEV}/authorized
+    echo "${USB_DEV}" > /sys/bus/usb/drivers/usb/unbind
     sleep 4
-    echo 1 > /sys/bus/usb/devices/${USB_DEV}/authorized
+    echo "${USB_DEV}" > /sys/bus/usb/drivers/usb/bind
     sleep 5
 fi
 
