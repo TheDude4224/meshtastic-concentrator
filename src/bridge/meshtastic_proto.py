@@ -253,7 +253,7 @@ LONGFAST_CONFIG = {
 
 # Std LoRa channel freq — must match [gateway.concentrator.lora_std] in concentratord.toml
 # Multi-SF channels are 125kHz (SX1302 HW limit); Meshtastic LongFast needs 250kHz.
-STD_CHANNEL_FREQ = 904_600_000  # Hz
+STD_CHANNEL_FREQ = 906_875_000  # Hz
 
 def get_tx_frequency(packet_id: int) -> int:
     """TX on the Std LoRa channel (250kHz SF11) so concentratord can also receive our packets."""
