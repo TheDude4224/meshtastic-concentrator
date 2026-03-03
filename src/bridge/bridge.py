@@ -540,9 +540,16 @@ class MeshtasticBridge:
                 if now - v < 300
             }
 
-            # Decode Meshtastic packet
+            # Decode Meshtastic packet — try configured channel first, then fallbacks
             from meshtastic_proto import decode_packet, PORTNUM_NAMES
-            decoded = decode_packet(rx.payload, self.config.channel_name)
+            channel_tried = self.config.channel_name
+            decoded = decode_packet(rx.payload, channel_tried)
+            if decoded.get('error') and channel_tried != "LongFast":
+                # Fallback: try LongFast (handles T-Beam range_test, nodeinfo, etc.)
+                fb = decode_packet(rx.payload, "LongFast")
+                if not fb.get('error'):
+                    decoded = fb
+                    channel_tried = "LongFast"
 
             src_hex = f"!{decoded['src']:08x}" if decoded.get('src') else "?"
             dst_hex = f"!{decoded['dst']:08x}" if decoded.get('dst') else "?"
@@ -552,6 +559,7 @@ class MeshtasticBridge:
                 f"RX #{self._rx_count}: {len(rx.payload)}B",
                 f"ch={rx.if_channel} rssi={rx.rssi:.0f} snr={rx.snr:.1f}",
                 f"freq={rx.frequency/1e6:.3f}MHz",
+                f"key={channel_tried}",
             ]
             if decoded.get('src'):
                 log_parts.append(f"src={src_hex} dst={dst_hex} [{pn}]")
